@@ -12,6 +12,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import chromedriver_autoinstaller
 import unicodedata
+import re
 
 # --- CONTROL DE ACCESO ---
 def check_password():
