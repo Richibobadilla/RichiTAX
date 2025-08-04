@@ -1,8 +1,8 @@
 streamlit
-pdf2image
-opencv-python-headless
-numpy
 pandas
+opencv-python
+numpy
 selenium
 chromedriver-autoinstaller
-pymupdf
+PyMuPDF
+openpyxl
