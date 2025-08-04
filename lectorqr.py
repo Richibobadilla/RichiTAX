@@ -1,22 +1,15 @@
-
 import streamlit as st 
-import tempfile
-import os
 import fitz  # PyMuPDF
-from pyzbar.pyzbar import decode
-from PIL import Image
-import numpy as np
 import pandas as pd
+import unicodedata
+import re
 import time
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import chromedriver_autoinstaller
-import unicodedata
-import re
 
-# --- CONTROL DE ACCESO ---
 def check_password():
     def password_entered():
         if (
@@ -40,6 +33,8 @@ def check_password():
 
 check_password()
 
+st.set_page_config(page_title="RichiTAX", page_icon="📄", layout="wide")
+
 def es_match(label, target):
     try:
         label_normalizado = unicodedata.normalize('NFKD', label).encode('ASCII', 'ignore').decode().upper().strip()
@@ -48,45 +43,6 @@ def es_match(label, target):
     except:
         return False
 
-st.set_page_config(page_title="RichiTAX", page_icon="📄", layout="wide")
-
-# --- ESTILO CUSTOM ---
-st.markdown("""
-    <style>
-    .stApp {
-        background: linear-gradient(to right, #fff0e5, #eafafc);
-    }
-    .main .block-container {
-        background-color: white;
-        padding: 2rem;
-        border-radius: 20px;
-        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
-    }
-    .stDownloadButton>button {
-        background: linear-gradient(to right, #6c63ff, #5145cd);
-        color: white;
-        border: none;
-        border-radius: 8px;
-        padding: 10px 20px;
-        font-weight: bold;
-        transition: 0.3s;
-    }
-    .stDownloadButton>button:hover {
-        background: linear-gradient(to right, #5145cd, #6c63ff);
-        transform: scale(1.03);
-        cursor: pointer;
-    }
-    </style>
-""", unsafe_allow_html=True)
-
-# --- FUNCIONES ---
-def detectar_qr_pyzbar(imagen_pil):
-    decoded_objs = decode(imagen_pil)
-    for obj in decoded_objs:
-        if obj.type == 'QRCODE':
-            return obj.data.decode("utf-8")
-    return None
-
 def procesar_pdf(pdf_file):
     doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
     for page in doc:
@@ -94,24 +50,13 @@ def procesar_pdf(pdf_file):
         match = re.search(r'https://verificacfdi\.facturaelectronica\.sat\.gob\.mx.*?re=[^&\s]+&fe=[^&\s]+', text)
         if match:
             return match.group(0)
-        # Si no detecta texto, intenta leer QR desde imagen
-        pix = page.get_pixmap(dpi=300)
-        img_pil = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        qr_data = detectar_qr_pyzbar(img_pil)
-        if qr_data:
-            return qr_data
     return None
-
-def extraer_rfc_desde_qr(qr_data):
-    match = re.search(r"RFC[:\s]+([A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3})", qr_data.upper())
-    return match.group(1) if match else "No detectado"
 
 def extraer_datos_desde_pagina(url):
     chromedriver_autoinstaller.install()
     options = webdriver.ChromeOptions()
     options.add_argument("--headless")
     options.add_argument("--window-size=1200x1400")
-
     driver = webdriver.Chrome(options=options)
     driver.get(url)
     wait = WebDriverWait(driver, 10)
@@ -138,11 +83,16 @@ def extraer_datos_desde_pagina(url):
 
         tabla = wait.until(EC.presence_of_element_located((By.CLASS_NAME, "ui-datatable-data")))
         filas = tabla.find_elements(By.TAG_NAME, "tr")
+
         nombre = paterno = materno = ""
         for fila in filas:
             celdas = fila.find_elements(By.TAG_NAME, "td")
             if len(celdas) >= 2:
-                label = celdas[0].text.strip().upper()
+                try:
+                    label_element = celdas[0].find_element(By.TAG_NAME, "span")
+                    label = label_element.text.strip().upper()
+                except:
+                    label = celdas[0].text.strip().upper()
                 valor = celdas[1].text.strip().upper()
                 if es_match(label, "Denominación o Razón Social"):
                     nombre_razon = valor
@@ -162,8 +112,20 @@ def extraer_datos_desde_pagina(url):
             for fila in filas:
                 celdas = fila.find_elements(By.TAG_NAME, "td")
                 if len(celdas) >= 2:
-                    label = celdas[0].text.strip().upper()
-                    valor = celdas[1].text.strip()
+                    try:
+                        label_element = celdas[0].find_element(By.TAG_NAME, "span")
+                        label = label_element.text.strip().upper()
+                    except:
+                        label = celdas[0].text.strip().upper()
+                    try:
+                        input_elem = celdas[1].find_element(By.TAG_NAME, "input")
+                        valor = input_elem.get_attribute("value").strip()
+                    except:
+                        try:
+                            span_elem = celdas[1].find_element(By.TAG_NAME, "span")
+                            valor = span_elem.text.strip()
+                        except:
+                            valor = celdas[1].text.strip()
                     if "ENTIDAD FEDERATIVA" in label:
                         datos_extra["Entidad Federativa"] = valor
                     elif "MUNICIPIO" in label:
@@ -182,15 +144,14 @@ def extraer_datos_desde_pagina(url):
                         datos_extra["Régimen Fiscal"] = valor
                     elif "FECHA DE ALTA" in label:
                         datos_extra["Fecha de alta"] = valor
-
     except Exception as e:
         print("⚠️ Error:", e)
 
     driver.quit()
     return nombre_razon, rfc_detectado, datos_extra
 
-st.title("📄 RichiTAX (QR compatible en Streamlit)")
-st.markdown("Sube tus constancias fiscales en PDF. Detectamos QR aunque venga como imagen y consultamos el portal SAT.")
+st.title("📄 RichiTAX (solo texto)")
+st.markdown("Sube tus constancias fiscales en PDF. Detectaremos el enlace de verificación del SAT directamente desde el texto del archivo.")
 
 archivos = st.file_uploader("Selecciona archivos PDF", type="pdf", accept_multiple_files=True)
 
@@ -203,7 +164,7 @@ if archivos:
                 nombre_razon, rfc_extraido, datos_extra = extraer_datos_desde_pagina(qr_data)
             else:
                 nombre_razon = "QR no detectado"
-                rfc_extraido = extraer_rfc_desde_qr(qr_data) if qr_data else "No detectado"
+                rfc_extraido = "No detectado"
                 datos_extra = {campo: "No detectado" for campo in [
                     "Entidad Federativa", "Municipio", "Colonia", "Nombre de la vialidad", "Número exterior",
                     "Número interior", "CP", "Régimen Fiscal", "Fecha de alta"]}
@@ -219,9 +180,8 @@ if archivos:
     df_resultado = pd.DataFrame(resultados)
     st.success("✅ Procesamiento completo.")
     st.dataframe(df_resultado)
+
     nombre_archivo = "resultado_constancias.xlsx"
     df_resultado.to_excel(nombre_archivo, index=False)
     with open(nombre_archivo, "rb") as f:
         st.download_button("📅 Descargar Excel", f, file_name=nombre_archivo)
-
-st.markdown("<div style='text-align:center; margin-top:40px; color:#aaa;'>Hecho con 🐼 por Ricarbo Bobadilla – 2025</div>", unsafe_allow_html=True)
