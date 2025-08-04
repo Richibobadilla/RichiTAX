@@ -6,3 +6,5 @@ selenium
 chromedriver-autoinstaller
 PyMuPDF
 openpyxl
+pyzbar
+Pillow
