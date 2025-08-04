@@ -1,7 +1,7 @@
 import streamlit as st 
 import tempfile
 import os
-from pdf2image import convert_from_path
+import fitz  # PyMuPDF
 import cv2
 import numpy as np
 import pandas as pd
@@ -80,8 +80,6 @@ st.markdown("""
 
 
 # --- FUNCIONES ---
-POPPLER_PATH = r"C:\\poppler\\Library\\bin"
-
 def leer_qr_opencv(imagen_pil):
     imagen_cv = cv2.cvtColor(np.array(imagen_pil), cv2.COLOR_RGB2BGR)
     detector = cv2.QRCodeDetector()
@@ -94,15 +92,14 @@ def extraer_rfc_desde_qr(qr_data):
     return match.group(1) if match else "No detectado"
 
 def procesar_pdf(pdf_file):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(pdf_file.read())
-        tmp_path = tmp.name
-    paginas = convert_from_path(tmp_path, dpi=300, poppler_path=POPPLER_PATH)
-    for pagina in paginas:
-        contenido = leer_qr_opencv(pagina)
-        if contenido:
-            return contenido
+    doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+    for page in doc:
+        text = page.get_text()
+        match = re.search(r'https://verificacfdi\.facturaelectronica\.sat\.gob\.mx.*?re=[^&\s]+&fe=[^&\s]+', text)
+        if match:
+            return match.group(0)
     return None
+
 
 def extraer_datos_desde_pagina(url):
     chromedriver_autoinstaller.install()
@@ -244,7 +241,7 @@ if archivos:
     nombre_archivo = "resultado_constancias.xlsx"
     df_resultado.to_excel(nombre_archivo, index=False)
     with open(nombre_archivo, "rb") as f:
-        st.download_button("📥 Descargar Excel", f, file_name=nombre_archivo)
+        st.download_button("📅 Descargar Excel", f, file_name=nombre_archivo)
 
 st.markdown("<div style='text-align:center; margin-top:40px; color:#aaa;'>Hecho con 🐼 por Ricarbo Bobadilla – 2025</div>", unsafe_allow_html=True)
 
