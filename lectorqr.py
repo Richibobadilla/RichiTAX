@@ -1,12 +1,18 @@
-# RichiTAX (versión sin cv2 ni pyzbar, compatible con Streamlit Cloud)
-import streamlit as st
+
+import streamlit as st 
+import tempfile
+import os
 import fitz  # PyMuPDF
+from pyzbar.pyzbar import decode
+from PIL import Image
+import numpy as np
 import pandas as pd
-import chromedriver_autoinstaller
+import time
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+import chromedriver_autoinstaller
 import unicodedata
 import re
 
@@ -34,8 +40,17 @@ def check_password():
 
 check_password()
 
-# --- CONFIGURACION INICIAL ---
+def es_match(label, target):
+    try:
+        label_normalizado = unicodedata.normalize('NFKD', label).encode('ASCII', 'ignore').decode().upper().strip()
+        target_normalizado = unicodedata.normalize('NFKD', target).encode('ASCII', 'ignore').decode().upper().strip()
+        return target_normalizado in label_normalizado
+    except:
+        return False
+
 st.set_page_config(page_title="RichiTAX", page_icon="📄", layout="wide")
+
+# --- ESTILO CUSTOM ---
 st.markdown("""
     <style>
     .stApp {
@@ -65,13 +80,12 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- FUNCIONES ---
-def es_match(label, target):
-    try:
-        l1 = unicodedata.normalize('NFKD', label).encode('ASCII', 'ignore').decode().upper().strip()
-        l2 = unicodedata.normalize('NFKD', target).encode('ASCII', 'ignore').decode().upper().strip()
-        return l2 in l1
-    except:
-        return False
+def detectar_qr_pyzbar(imagen_pil):
+    decoded_objs = decode(imagen_pil)
+    for obj in decoded_objs:
+        if obj.type == 'QRCODE':
+            return obj.data.decode("utf-8")
+    return None
 
 def procesar_pdf(pdf_file):
     doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
@@ -80,17 +94,27 @@ def procesar_pdf(pdf_file):
         match = re.search(r'https://verificacfdi\.facturaelectronica\.sat\.gob\.mx.*?re=[^&\s]+&fe=[^&\s]+', text)
         if match:
             return match.group(0)
+        # Si no detecta texto, intenta leer QR desde imagen
+        pix = page.get_pixmap(dpi=300)
+        img_pil = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        qr_data = detectar_qr_pyzbar(img_pil)
+        if qr_data:
+            return qr_data
     return None
+
+def extraer_rfc_desde_qr(qr_data):
+    match = re.search(r"RFC[:\s]+([A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3})", qr_data.upper())
+    return match.group(1) if match else "No detectado"
 
 def extraer_datos_desde_pagina(url):
     chromedriver_autoinstaller.install()
     options = webdriver.ChromeOptions()
     options.add_argument("--headless")
     options.add_argument("--window-size=1200x1400")
+
     driver = webdriver.Chrome(options=options)
     driver.get(url)
     wait = WebDriverWait(driver, 10)
-
     nombre_razon = rfc_detectado = "No detectado"
     datos_extra = {
         "Entidad Federativa": "No detectado",
@@ -106,18 +130,20 @@ def extraer_datos_desde_pagina(url):
 
     try:
         wait.until(EC.presence_of_element_located((By.TAG_NAME, "li")))
-        texto = driver.find_element(By.CSS_SELECTOR, "li.ui-li-static.ui-body-c.ui-corner-top.ui-corner-bottom").text
-        match = re.search(r"RFC[:\s]+([A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3})", texto.upper())
+        li_rfc = driver.find_element(By.CSS_SELECTOR, "li.ui-li-static.ui-body-c.ui-corner-top.ui-corner-bottom")
+        texto = li_rfc.get_attribute("innerText").strip().upper()
+        match = re.search(r"RFC[:\s]+([A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3})", texto)
         if match:
             rfc_detectado = match.group(1)
 
-        filas = driver.find_elements(By.XPATH, "//table[@role='grid']//tr")
+        tabla = wait.until(EC.presence_of_element_located((By.CLASS_NAME, "ui-datatable-data")))
+        filas = tabla.find_elements(By.TAG_NAME, "tr")
         nombre = paterno = materno = ""
         for fila in filas:
             celdas = fila.find_elements(By.TAG_NAME, "td")
             if len(celdas) >= 2:
                 label = celdas[0].text.strip().upper()
-                valor = celdas[1].text.strip()
+                valor = celdas[1].text.strip().upper()
                 if es_match(label, "Denominación o Razón Social"):
                     nombre_razon = valor
                 elif es_match(label, "Nombre:"):
@@ -126,37 +152,45 @@ def extraer_datos_desde_pagina(url):
                     paterno = valor
                 elif es_match(label, "Apellido Materno:"):
                     materno = valor
-                elif "ENTIDAD FEDERATIVA" in label:
-                    datos_extra["Entidad Federativa"] = valor
-                elif "MUNICIPIO" in label:
-                    datos_extra["Municipio"] = valor
-                elif "COLONIA" in label:
-                    datos_extra["Colonia"] = valor
-                elif "NOMBRE DE LA VIALIDAD" in label:
-                    datos_extra["Nombre de la vialidad"] = valor
-                elif "NÚMERO EXTERIOR" in label:
-                    datos_extra["Número exterior"] = valor
-                elif "NÚMERO INTERIOR" in label:
-                    datos_extra["Número interior"] = valor
-                elif "CP" in label:
-                    datos_extra["CP"] = valor
-                elif "RÉGIMEN" in label:
-                    datos_extra["Régimen Fiscal"] = valor
-                elif "FECHA DE ALTA" in label:
-                    datos_extra["Fecha de alta"] = valor
 
         if nombre and paterno:
             nombre_razon = f"{nombre} {paterno} {materno}"
 
+        tabla_datos = driver.find_elements(By.XPATH, "//table[@role='grid']")
+        for tabla in tabla_datos:
+            filas = tabla.find_elements(By.TAG_NAME, "tr")
+            for fila in filas:
+                celdas = fila.find_elements(By.TAG_NAME, "td")
+                if len(celdas) >= 2:
+                    label = celdas[0].text.strip().upper()
+                    valor = celdas[1].text.strip()
+                    if "ENTIDAD FEDERATIVA" in label:
+                        datos_extra["Entidad Federativa"] = valor
+                    elif "MUNICIPIO" in label:
+                        datos_extra["Municipio"] = valor
+                    elif "COLONIA" in label:
+                        datos_extra["Colonia"] = valor
+                    elif "NOMBRE DE LA VIALIDAD" in label:
+                        datos_extra["Nombre de la vialidad"] = valor
+                    elif "NÚMERO EXTERIOR" in label:
+                        datos_extra["Número exterior"] = valor
+                    elif "NÚMERO INTERIOR" in label:
+                        datos_extra["Número interior"] = valor
+                    elif "CP" in label:
+                        datos_extra["CP"] = valor
+                    elif "RÉGIMEN" in label:
+                        datos_extra["Régimen Fiscal"] = valor
+                    elif "FECHA DE ALTA" in label:
+                        datos_extra["Fecha de alta"] = valor
+
     except Exception as e:
-        print("Error:", e)
+        print("⚠️ Error:", e)
 
     driver.quit()
     return nombre_razon, rfc_detectado, datos_extra
 
-# --- UI ---
-st.title("📄 RichiTAX (con QR)")
-st.markdown("Sube tus constancias fiscales en PDF y te daremos un Excel con los datos directamente del portal SAT.")
+st.title("📄 RichiTAX (QR compatible en Streamlit)")
+st.markdown("Sube tus constancias fiscales en PDF. Detectamos QR aunque venga como imagen y consultamos el portal SAT.")
 
 archivos = st.file_uploader("Selecciona archivos PDF", type="pdf", accept_multiple_files=True)
 
@@ -169,24 +203,25 @@ if archivos:
                 nombre_razon, rfc_extraido, datos_extra = extraer_datos_desde_pagina(qr_data)
             else:
                 nombre_razon = "QR no detectado"
-                rfc_extraido = "No detectado"
+                rfc_extraido = extraer_rfc_desde_qr(qr_data) if qr_data else "No detectado"
                 datos_extra = {campo: "No detectado" for campo in [
                     "Entidad Federativa", "Municipio", "Colonia", "Nombre de la vialidad", "Número exterior",
                     "Número interior", "CP", "Régimen Fiscal", "Fecha de alta"]}
 
-            fila = {"Archivo": archivo.name, "Nombre/Razón Social": nombre_razon, "RFC": rfc_extraido}
+            fila = {
+                "Archivo": archivo.name,
+                "Nombre/Razón Social": nombre_razon,
+                "RFC": rfc_extraido
+            }
             fila.update(datos_extra)
             resultados.append(fila)
 
     df_resultado = pd.DataFrame(resultados)
     st.success("✅ Procesamiento completo.")
     st.dataframe(df_resultado)
-
     nombre_archivo = "resultado_constancias.xlsx"
     df_resultado.to_excel(nombre_archivo, index=False)
     with open(nombre_archivo, "rb") as f:
         st.download_button("📅 Descargar Excel", f, file_name=nombre_archivo)
 
 st.markdown("<div style='text-align:center; margin-top:40px; color:#aaa;'>Hecho con 🐼 por Ricarbo Bobadilla – 2025</div>", unsafe_allow_html=True)
-
-#C:\py\LECTOR> python -m streamlit run lectorqr.py
